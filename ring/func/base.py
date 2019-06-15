@@ -563,9 +563,19 @@ import attr
 class Config(object):
     coder = attr.ib()
     user_interface = attr.ib()
+    storage = attr.ib()
     key_encoding = attr.ib()
-    #storage_class = attr.ib()
+    expire_default = attr.ib()
     #wire_class = attr.ib()
+
+    # FIXME:
+    @property
+    def encode(self):
+        return self.coder.encode
+
+    @property
+    def decode(self):
+        return self.coder.decode
 
 
 class Ring(object):
@@ -573,6 +583,7 @@ class Ring(object):
     def __init__(self, func):
         self.__func__ = func
         self._strand = None
+        self._config = None
 
     def __call__(self, *args, **kwargs):
         return self._strand(*args, **kwargs)
@@ -657,27 +668,18 @@ class Ring(object):
         if isinstance(user_interface, (tuple, list)):
             user_interface = type('_ComposedUserInterface', user_interface, {})
 
-        _storage_class = storage_class
-
-        self._config = Config(coder=ring_coder, user_interface=user_interface(self), key_encoding=key_encoding)
-
-        ring_object = self
+        self._config = Config(
+            coder=ring_coder, user_interface=user_interface(self),
+            storage=storage_class(self, storage_backend),
+            key_encoding=key_encoding,
+            expire_default=expire_default)
 
         class RingRope(RopeCore):
-            # user_interface_class = user_interface
-            storage_class = _storage_class
-
             def __init__(self, *args, **kwargs):
                 super(RingRope, self).__init__(*args, **kwargs)
-                self._ring_object = ring_object
-                self.storage = self.storage_class(self, storage_backend)
                 self._ignorable_keys = suggest_ignorable_keys(
                     self.callable, ignorable_keys)
                 self._key_prefix = suggest_key_prefix(self.callable, key_prefix)
-                # self.compose_key = create_key_builder(
-                #    self.callable, _key_prefix, _ignorable_keys,
-                #    encoding=key_encoding, key_refactor=key_refactor, in_memory_storage=in_memory_storage)
-                # self.compose_key.ignorable_keys = _ignorable_keys
 
                 # fixme
                 self.encode = self.coder.encode
@@ -696,7 +698,7 @@ class Ring(object):
                 for i, prearg in enumerate(bound_args):
                     full_kwargs[c.parameters[i].name] = bound_args[i]
 
-                in_memory_storage = hasattr(self.storage, 'in_memory_storage')
+                in_memory_storage = hasattr(config.storage, 'in_memory_storage')
                 coerced_kwargs = {
                     k: coerce(v, in_memory_storage) for k, v in full_kwargs.items()
                     if k not in self._ignorable_keys}
@@ -706,6 +708,14 @@ class Ring(object):
                 if key_refactor:
                     key = key_refactor(key)
                 return key
+
+            @property
+            def _ring_object(self):
+                return self.rope._ring_object
+
+            @property
+            def storage(self):
+                return self._ring_object.config.storage
 
             @property
             def coder(self):
@@ -772,6 +782,7 @@ class Ring(object):
                 return self.__getattribute__(name)
 
         wire_rope = WireRope(_RingWire, RingRope)
+        wire_rope._ring_object = self
         strand = wire_rope(self.__func__)
         strand.miss_value = miss_value
         strand.expire_default = expire_default
@@ -885,9 +896,13 @@ class BaseStorage(object):
     are mandatory; Otherwise not.
     """
 
-    def __init__(self, rope, backend):
-        self.rope = rope
+    def __init__(self, ring, backend):
+        self._ring = ring
         self.backend = backend
+
+    @property
+    def rope(self):
+        return self._ring._config
 
     @abc.abstractmethod
     def get(self, key):  # pragma: no cover
